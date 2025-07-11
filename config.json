@@ -24,7 +24,7 @@
             "provider": {
                 "type": "open_ai",
                 "model": "gpt-4o-mini",
-                "temperature": 0.4
+                "temperature": 0.2
             },
             "prompt": ""
         },
