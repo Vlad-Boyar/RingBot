@@ -4,10 +4,14 @@ import json
 import sys
 import websockets
 import ssl
+import pathlib
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
+CONFIG_PATH = pathlib.Path(__file__).parent / "config.json"
+PROMPT_PATH = pathlib.Path(__file__).parent / "prompt.txt"
 
 def sts_connect():
     api_key = os.getenv('DEEPGRAM_API_KEY')
@@ -28,46 +32,15 @@ async def twilio_handler(twilio_ws):
     streamsid_queue = asyncio.Queue()
 
     async with sts_connect() as sts_ws:
-        config_message = {
-            "type": "Settings",
-            "audio": {
-                "input": {
-                    "encoding": "mulaw",
-                    "sample_rate": 8000,
-                },
-                "output": {
-                    "encoding": "mulaw",
-                    "sample_rate": 8000,
-                    "container": "none",
-                },
-            },
-            "agent": {
-                "language": "en",
-                "listen": {
-                    "provider": {
-                        "type": "deepgram",
-                        "model": "nova-3",
-                        "keyterms": ["hello", "goodbye"]
-                    }
-                },
-                "think": {
-                    "provider": {
-                        "type": "open_ai",
-                        "model": "gpt-4o-mini",
-                        "temperature": 0.7
-                    },
-                    "prompt": "You are a helpful AI assistant focused on customer service."
-                },
-                "speak": {
-                    "provider": {
-                        "type": "deepgram",
-                        "model": "aura-2-thalia-en"
-                    }
-                },
-                "greeting": "Hello! How can I help you today?"
-            }
-        }
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            config_message = json.load(f)
 
+        # Подставляем prompt из .txt
+        with open(PROMPT_PATH, "r", encoding="utf-8") as f:
+            prompt_text = f.read().strip()
+            config_message["agent"]["think"]["prompt"] = prompt_text
+
+        # Отправляем Deepgram Agent
         await sts_ws.send(json.dumps(config_message))
 
         async def sts_sender(sts_ws):
@@ -111,8 +84,8 @@ async def twilio_handler(twilio_ws):
         async def twilio_receiver(twilio_ws):
             print("twilio_receiver started")
             # twilio sends audio data as 160 byte messages containing 20ms of audio each
-            # we will buffer 20 twilio messages corresponding to 0.4 seconds of audio to improve throughput performance
-            BUFFER_SIZE = 20 * 160
+            # we will buffer 5 twilio messages corresponding to 0.1 seconds of audio to improve throughput performance
+            BUFFER_SIZE = 5 * 160
 
             inbuffer = bytearray(b"")
             async for message in twilio_ws:

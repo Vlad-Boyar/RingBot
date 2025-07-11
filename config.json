@@ -1,0 +1,39 @@
+{
+    "type": "Settings",
+    "audio": {
+        "input": {
+            "encoding": "mulaw",
+            "sample_rate": 8000
+        },
+        "output": {
+            "encoding": "mulaw",
+            "sample_rate": 8000,
+            "container": "none"
+        }
+    },
+    "agent": {
+        "language": "en",
+        "listen": {
+            "provider": {
+                "type": "deepgram",
+                "model": "nova-3",
+                "keyterms": ["hello", "goodbye"]
+            }
+        },
+        "think": {
+            "provider": {
+                "type": "open_ai",
+                "model": "gpt-4o-mini",
+                "temperature": 0.4
+            },
+            "prompt": ""
+        },
+        "speak": {
+            "provider": {
+                "type": "deepgram",
+                "model": "aura-2-odysseus-en"
+            }
+        },
+        "greeting": "Hello! How can I help you today?"
+    }
+}
