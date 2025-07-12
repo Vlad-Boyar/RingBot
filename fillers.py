@@ -7,7 +7,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 API_KEY = os.getenv("DEEPGRAM_API_KEY")
-PHRASES = ["Hmm", "Well", "Let me think"]
+PHRASES = [
+  "Okay, let me check that.",
+  "Alright, one moment please.",
+  "Sure, I’ll check for you.",
+  "Got it, I’m on it.",
+  "Let’s see what I can find."
+]
 
 ASSETS_DIR = pathlib.Path("assets")
 ASSETS_DIR.mkdir(exist_ok=True)

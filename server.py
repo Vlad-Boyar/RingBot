@@ -36,27 +36,28 @@ def sts_connect():
     )
 
 async def play_filler_to_twilio(twilio_ws, streamsid):
-    filler_files = glob.glob("assets/*.mulaw")
-    if not filler_files:
-        print("❌ No filler files found in assets/")
-        return
+    filler_file = "assets/keyboard.mulaw"
+    chunk_size = 160  # ~20ms при 8kHz
 
-    filler_file = random.choice(filler_files)
-    if not os.path.isfile(filler_file):
-        print(f"❌ Filler file not found: {filler_file}")
-        return
+    try:
+        with open(filler_file, "rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    f.seek(0)
+                    continue
 
-    with open(filler_file, "rb") as f:
-        data = f.read()
-
-    payload = base64.b64encode(data).decode()
-    media_message = {
-        "event": "media",
-        "streamSid": streamsid,
-        "media": {"payload": payload},
-    }
-    await twilio_ws.send(json.dumps(media_message))
-    print(f"[{time.time():.3f}] 🐑 Sent random filler: {os.path.basename(filler_file)} ({len(data)} bytes)")
+                payload = base64.b64encode(chunk).decode()
+                media_message = {
+                    "event": "media",
+                    "streamSid": streamsid,
+                    "media": {"payload": payload},
+                }
+                await twilio_ws.send(json.dumps(media_message))
+                await asyncio.sleep(0.02)  # имитация real-time
+    except asyncio.CancelledError:
+        print(f"[{time.time():.3f}] 🛑 Filler loop stopped cleanly (CancelledError)")
+        raise
 
 async def twilio_handler(twilio_ws):
     audio_queue = asyncio.Queue()
@@ -94,6 +95,9 @@ async def twilio_handler(twilio_ws):
 
             should_clear = False
             first_tts_chunk = True
+            global bot_is_speaking, bot_thinking
+
+            filler_task = None
             filler_sent = False
 
             tts_buffer = bytearray()
@@ -157,14 +161,22 @@ async def twilio_handler(twilio_ws):
                     if decoded.get("type") == "ConversationText":
                         if decoded.get("role") == "user":
                             bot_thinking = True
-                            if not bot_is_speaking and not filler_sent:
-                                await play_filler_to_twilio(twilio_ws, streamsid)
+                            if (filler_task is None or filler_task.done()) and not filler_sent:
+                                filler_task = asyncio.create_task(
+                                    play_filler_to_twilio(twilio_ws, streamsid)
+                                )
+                                print(f"[{time.time():.3f}] 💬 Filler task STARTED id={id(filler_task)}")
                                 filler_sent = True
-                                print(f"[{time.time():.3f}] 💬 Filler sent after user speech")
+
                         elif decoded.get("role") == "assistant":
-                            bot_thinking = True
+                            if filler_task and not filler_task.done():
+                                filler_task.cancel()
+                                print(f"[{time.time():.3f}] ✂️ Filler CANCELLED by ConversationText id={id(filler_task)}")
 
                     if decoded.get("type") == "AgentAudioDone":
+                        if filler_task and not filler_task.done():
+                            filler_task.cancel()
+                            print(f"[{time.time():.3f}] ✂️ Filler CANCELLED by AgentAudioDone id={id(filler_task)}")
                         bot_is_speaking = False
                         bot_thinking = False
                         filler_sent = False
@@ -188,6 +200,12 @@ async def twilio_handler(twilio_ws):
                 bot_is_speaking = True
 
                 if first_tts_chunk:
+                    if filler_task and not filler_task.done():
+                        filler_task.cancel()
+                        print(f"[{time.time():.3f}] ✂️ Filler CANCELLED by first TTS chunk id={id(filler_task)}")
+                    else:
+                        print(f"[{time.time():.3f}] ⚠️ No filler task to cancel on first TTS chunk")
+
                     global tts_start_ts, last_user_chunk_ts
                     tts_start_ts = time.time()
                     latency_gap = tts_start_ts - last_user_chunk_ts
