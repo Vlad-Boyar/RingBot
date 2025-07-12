@@ -20,3 +20,4 @@ dist/
 # build
 build/
 poetry.lock
+server.log

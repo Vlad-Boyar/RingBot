@@ -2,11 +2,14 @@ import asyncio
 import base64
 import json
 import sys
-import websockets
 import pathlib
 import os
 import time
+
 from dotenv import load_dotenv
+import websockets  # ✅ legacy API
+import websockets.legacy.server as ws_server
+import websockets.legacy.client as ws_client
 
 load_dotenv()
 
@@ -20,7 +23,7 @@ def sts_connect():
 
     print(f"[{time.time():.3f}] ✅ API Key loaded, length: {len(api_key.strip())}")
 
-    return websockets.connect(
+    return ws_client.connect(   # ✅ именно legacy client!
         "wss://agent.deepgram.com/v1/agent/converse",
         extra_headers={"Authorization": f"Token {api_key.strip()}"}
     )
@@ -29,7 +32,6 @@ async def twilio_handler(twilio_ws):
     audio_queue = asyncio.Queue()
     streamsid_queue = asyncio.Queue()
 
-    # Глобальные метки времени
     global last_user_chunk_ts
     global tts_start_ts
     last_user_chunk_ts = 0.0
@@ -46,16 +48,15 @@ async def twilio_handler(twilio_ws):
         await sts_ws.send(json.dumps(config_message))
         print(f"[{time.time():.3f}] ✅ Sent initial config to Deepgram")
 
-        async def sts_sender(sts_ws):
+        async def sts_sender():
             print(f"[{time.time():.3f}] 🔄 sts_sender started")
             while True:
                 chunk = await audio_queue.get()
                 print(f"[{time.time():.3f}] sts_sender → Deepgram | chunk size: {len(chunk)} bytes")
                 await sts_ws.send(chunk)
 
-        async def sts_receiver(sts_ws):
+        async def sts_receiver():
             print(f"[{time.time():.3f}] 🔄 sts_receiver started")
-
             streamsid = await streamsid_queue.get()
             print(f"[{time.time():.3f}] sts_receiver got streamsid: {streamsid}")
 
@@ -98,11 +99,11 @@ async def twilio_handler(twilio_ws):
                 await twilio_ws.send(json.dumps(media_message))
                 print(f"[{time.time():.3f}] 📤 Sent TTS chunk → Twilio")
 
-        async def twilio_receiver(twilio_ws):
+        async def twilio_receiver():
             print(f"[{time.time():.3f}] 🔄 twilio_receiver started")
             BUFFER_SIZE = 5 * 160  # 0.1 сек аудио
-
             inbuffer = bytearray(b"")
+
             async for message in twilio_ws:
                 try:
                     data = json.loads(message)
@@ -137,27 +138,28 @@ async def twilio_handler(twilio_ws):
 
         await asyncio.wait(
             [
-                asyncio.create_task(sts_sender(sts_ws)),
-                asyncio.create_task(sts_receiver(sts_ws)),
-                asyncio.create_task(twilio_receiver(twilio_ws)),
+                asyncio.create_task(sts_sender()),
+                asyncio.create_task(sts_receiver()),
+                asyncio.create_task(twilio_receiver()),
             ]
         )
 
         await twilio_ws.close()
         print(f"[{time.time():.3f}] ✅ twilio_handler closed Twilio WS connection")
 
+
 async def router(websocket, path):
-    print(f"[{time.time():.3f}] Incoming WS connection on path: {path}")
+    print(f"Path: {path}")
     if path == "/twilio":
         print(f"[{time.time():.3f}] 🚦 Starting Twilio handler")
         await twilio_handler(websocket)
+    else:
+        print(f"[{time.time():.3f}] ❌ Unknown path: {path}")
+        await websocket.close()
 
-def main():
-    server = websockets.serve(router, "localhost", 5000)
-    print(f"[{time.time():.3f}] 🚀 Server starting on ws://localhost:5000")
+async def main():
+    async with ws_server.serve(router, "localhost", 5000):
+        print("Server started ws://localhost:5000")
+        await asyncio.Future()
 
-    asyncio.get_event_loop().run_until_complete(server)
-    asyncio.get_event_loop().run_forever()
-
-if __name__ == "__main__":
-    sys.exit(main() or 0)
+asyncio.run(main())
