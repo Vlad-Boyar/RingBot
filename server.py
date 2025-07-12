@@ -5,9 +5,10 @@ import sys
 import pathlib
 import os
 import time
-
+import tempfile
 from dotenv import load_dotenv
-import websockets  # ✅ legacy API
+import websockets  
+import subprocess
 import websockets.legacy.server as ws_server
 import websockets.legacy.client as ws_client
 
@@ -63,12 +64,71 @@ async def twilio_handler(twilio_ws):
             should_clear = False
             first_tts_chunk = True
 
-            async for message in sts_ws:
+            # 📦 Буфер и таймаут
+            tts_buffer = bytearray()
+            last_chunk_ts = time.time()
+            IDLE_TIMEOUT = 0.3  # 300 ms
+
+            async def process_tts_buffer():
+                nonlocal tts_buffer
+                if not tts_buffer:
+                    return
+
+                with tempfile.NamedTemporaryFile(delete=False) as tmp_in:
+                    tmp_in.write(tts_buffer)
+                    tmp_in.flush()
+                    tmp_input_path = tmp_in.name
+
+                with tempfile.NamedTemporaryFile(delete=False) as tmp_out:
+                    tmp_output_path = tmp_out.name
+
+                print(f"[{time.time():.3f}] ⚡ Running ffmpeg atempo=1.2")
+                subprocess.run([
+                    "ffmpeg",
+                    "-y",
+                    "-f", "mulaw",
+                    "-ar", "8000",
+                    "-i", tmp_input_path,
+                    "-filter:a", "atempo=1.2",
+                    "-f", "mulaw",
+                    tmp_output_path
+                ], check=True)
+
+                with open(tmp_output_path, "rb") as f:
+                    sped_up_data = f.read()
+
+                os.unlink(tmp_input_path)
+                os.unlink(tmp_output_path)
+
+                media_message = {
+                    "event": "media",
+                    "streamSid": streamsid,
+                    "media": {"payload": base64.b64encode(sped_up_data).decode("ascii")},
+                }
+                await twilio_ws.send(json.dumps(media_message))
+                print(f"[{time.time():.3f}] 🚀 Sent sped-up chunk → Twilio")
+
+                tts_buffer = bytearray()
+
+            while True:
+                try:
+                    message = await asyncio.wait_for(sts_ws.recv(), timeout=IDLE_TIMEOUT)
+                except asyncio.TimeoutError:
+                    # Таймаут — значит фраза закончилась
+                    if tts_buffer:
+                        print(f"[{time.time():.3f}] ⏰ Idle timeout — processing TTS buffer")
+                        await process_tts_buffer()
+                    continue
+
                 if isinstance(message, str):
                     decoded = json.loads(message)
                     print(f"[{time.time():.3f}] 🗨 Control message: {decoded}")
 
                     if decoded['type'] == 'UserStartedSpeaking':
+                        if tts_buffer:
+                            print(f"[{time.time():.3f}] 🚫 Barge-in — process remaining TTS buffer")
+                            await process_tts_buffer()
+
                         clear_message = {
                             "event": "clear",
                             "streamSid": streamsid
@@ -91,13 +151,9 @@ async def twilio_handler(twilio_ws):
                     print(f"[{time.time():.3f}] 🔕 Dropped TTS chunk (barge-in active)")
                     continue
 
-                media_message = {
-                    "event": "media",
-                    "streamSid": streamsid,
-                    "media": {"payload": base64.b64encode(message).decode("ascii")},
-                }
-                await twilio_ws.send(json.dumps(media_message))
-                print(f"[{time.time():.3f}] 📤 Sent TTS chunk → Twilio")
+                tts_buffer.extend(message)
+                last_chunk_ts = time.time()
+                print(f"[{time.time():.3f}] 📥 TTS chunk buffered | size: {len(tts_buffer)} bytes")
 
         async def twilio_receiver():
             print(f"[{time.time():.3f}] 🔄 twilio_receiver started")

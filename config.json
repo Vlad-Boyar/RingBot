@@ -31,7 +31,7 @@
         "speak": {
             "provider": {
                 "type": "deepgram",
-                "model": "aura-2-odysseus-en"
+                "model": "aura-2-andromeda-en"
             }
         },
         "greeting": "Hello! How can I help you today?"
