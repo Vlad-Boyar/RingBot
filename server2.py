@@ -11,8 +11,8 @@ CONFIG_PATH = pathlib.Path(__file__).parent / "config.json"
 PROMPT_PATH = pathlib.Path(__file__).parent / "prompt.txt"
 
 # === Глобальные ===
-last_user_chunk_ts = time.time()
-bot_is_speaking = False  # 🚩 Новый флаг
+bot_is_speaking = False
+bot_thinking = False
 
 async def play_filler_to_twilio(twilio_ws, streamsid):
     filler_file = "assets/filler.mulaw"
@@ -32,27 +32,6 @@ async def play_filler_to_twilio(twilio_ws, streamsid):
     await twilio_ws.send(json.dumps(media_message))
     print(f"[{time.time():.3f}] 🐑 Sent filler ({len(data)} bytes)")
 
-async def vad_filler_loop(twilio_ws, streamsid):
-    global last_user_chunk_ts, bot_is_speaking
-    VAD_SILENCE_GAP = 1.5
-
-    print(f"[{time.time():.3f}] ✅ VAD filler loop started")
-
-    filler_sent = False  # 🚩 Флаг для текущей паузы
-
-    while not twilio_ws.closed:
-        await asyncio.sleep(0.2)
-        gap = time.time() - last_user_chunk_ts
-        print(f"[{time.time():.3f}] ⏱ GAP: {gap:.2f} sec | bot_is_speaking={bot_is_speaking} | filler_sent={filler_sent}")
-
-        if gap > VAD_SILENCE_GAP and not bot_is_speaking:
-            if not filler_sent:
-                await play_filler_to_twilio(twilio_ws, streamsid)
-                filler_sent = True
-        else:
-            # Если пользователь сказал что-то новое — сбрасываем флаг
-            filler_sent = False
-
 def sts_connect():
     api_key = os.getenv("DEEPGRAM_API_KEY")
     if not api_key:
@@ -63,7 +42,7 @@ def sts_connect():
     )
 
 async def twilio_handler(twilio_ws):
-    global last_user_chunk_ts, bot_is_speaking
+    global bot_is_speaking, bot_thinking
     audio_queue = asyncio.Queue()
     streamsid_queue = asyncio.Queue()
 
@@ -80,7 +59,6 @@ async def twilio_handler(twilio_ws):
         async def twilio_receiver():
             BUFFER_SIZE = 5 * 160
             inbuffer = bytearray()
-            vad_task = None
 
             async for msg in twilio_ws:
                 data = json.loads(msg)
@@ -90,7 +68,6 @@ async def twilio_handler(twilio_ws):
                     streamsid = data["start"]["streamSid"]
                     streamsid_queue.put_nowait(streamsid)
                     print(f"[{time.time():.3f}] 🟢 Twilio START {streamsid}")
-                    vad_task = asyncio.create_task(vad_filler_loop(twilio_ws, streamsid))
 
                 elif event == "media":
                     chunk = base64.b64decode(data["media"]["payload"])
@@ -99,16 +76,13 @@ async def twilio_handler(twilio_ws):
 
                 elif event == "stop":
                     print(f"[{time.time():.3f}] 🛑 Twilio STOP")
-                    if vad_task:
-                        vad_task.cancel()
                     break
 
                 while len(inbuffer) >= BUFFER_SIZE:
                     chunk = inbuffer[:BUFFER_SIZE]
                     audio_queue.put_nowait(chunk)
-                    last_user_chunk_ts = time.time()
-                    print(f"[{time.time():.3f}] 🎙️ User chunk → Deepgram")
                     inbuffer = inbuffer[BUFFER_SIZE:]
+                    print(f"[{time.time():.3f}] 🎙️ User chunk → Deepgram")
 
         async def sts_sender():
             while True:
@@ -116,8 +90,9 @@ async def twilio_handler(twilio_ws):
                 await sts_ws.send(chunk)
 
         async def sts_receiver():
-            global bot_is_speaking
+            global bot_is_speaking, bot_thinking
             streamsid = await streamsid_queue.get()
+            filler_sent = False
 
             while True:
                 msg = await sts_ws.recv()
@@ -125,9 +100,22 @@ async def twilio_handler(twilio_ws):
                     decoded = json.loads(msg)
                     print(f"Deepgram: {decoded}")
 
+                    if decoded.get("type") == "ConversationText":
+                        if decoded.get("role") == "user":
+                            bot_thinking = True
+                            if not bot_is_speaking and not filler_sent:
+                                await play_filler_to_twilio(twilio_ws, streamsid)
+                                filler_sent = True
+                                print(f"[{time.time():.3f}] 💬 Filler sent after user speech")
+
+                        elif decoded.get("role") == "assistant":
+                            bot_thinking = True
+
                     if decoded.get("type") == "AgentAudioDone":
                         bot_is_speaking = False
-                        print(f"[{time.time():.3f}] 🟢 TTS done → bot_is_speaking=False")
+                        bot_thinking = False
+                        filler_sent = False
+                        print(f"[{time.time():.3f}] 🟢 TTS done → bot_is_speaking=False, bot_thinking=False")
                     continue
 
                 bot_is_speaking = True
@@ -138,7 +126,7 @@ async def twilio_handler(twilio_ws):
                     "media": {"payload": payload},
                 }
                 await twilio_ws.send(json.dumps(media_message))
-                print(f"[{time.time():.3f}] 🔈 Sent TTS chunk")
+                print(f"[{time.time():.3f}] 🔈 Sent TTS chunk → bot_is_speaking=True")
 
         await asyncio.wait([
             asyncio.create_task(twilio_receiver()),
@@ -157,4 +145,5 @@ async def main():
         print("✅ WS Server started ws://localhost:5000")
         await asyncio.Future()
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
