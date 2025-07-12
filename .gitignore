@@ -21,3 +21,4 @@ dist/
 build/
 poetry.lock
 server.log
+assets/

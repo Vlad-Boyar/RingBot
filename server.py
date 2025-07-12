@@ -6,8 +6,10 @@ import pathlib
 import os
 import time
 import tempfile
+import random
+import glob
 from dotenv import load_dotenv
-import websockets  
+import websockets
 import subprocess
 import websockets.legacy.server as ws_server
 import websockets.legacy.client as ws_client
@@ -17,6 +19,10 @@ load_dotenv()
 CONFIG_PATH = pathlib.Path(__file__).parent / "config.json"
 PROMPT_PATH = pathlib.Path(__file__).parent / "prompt.txt"
 
+# === Глобальные ===
+bot_is_speaking = False
+bot_thinking = False
+
 def sts_connect():
     api_key = os.getenv('DEEPGRAM_API_KEY')
     if not api_key:
@@ -24,10 +30,33 @@ def sts_connect():
 
     print(f"[{time.time():.3f}] ✅ API Key loaded, length: {len(api_key.strip())}")
 
-    return ws_client.connect(   # ✅ именно legacy client!
+    return ws_client.connect(
         "wss://agent.deepgram.com/v1/agent/converse",
         extra_headers={"Authorization": f"Token {api_key.strip()}"}
     )
+
+async def play_filler_to_twilio(twilio_ws, streamsid):
+    filler_files = glob.glob("assets/*.mulaw")
+    if not filler_files:
+        print("❌ No filler files found in assets/")
+        return
+
+    filler_file = random.choice(filler_files)
+    if not os.path.isfile(filler_file):
+        print(f"❌ Filler file not found: {filler_file}")
+        return
+
+    with open(filler_file, "rb") as f:
+        data = f.read()
+
+    payload = base64.b64encode(data).decode()
+    media_message = {
+        "event": "media",
+        "streamSid": streamsid,
+        "media": {"payload": payload},
+    }
+    await twilio_ws.send(json.dumps(media_message))
+    print(f"[{time.time():.3f}] 🐑 Sent random filler: {os.path.basename(filler_file)} ({len(data)} bytes)")
 
 async def twilio_handler(twilio_ws):
     audio_queue = asyncio.Queue()
@@ -35,6 +64,8 @@ async def twilio_handler(twilio_ws):
 
     global last_user_chunk_ts
     global tts_start_ts
+    global bot_is_speaking, bot_thinking
+
     last_user_chunk_ts = 0.0
     tts_start_ts = 0.0
 
@@ -63,11 +94,11 @@ async def twilio_handler(twilio_ws):
 
             should_clear = False
             first_tts_chunk = True
+            filler_sent = False
 
-            # 📦 Буфер и таймаут
             tts_buffer = bytearray()
             last_chunk_ts = time.time()
-            IDLE_TIMEOUT = 0.3  # 300 ms
+            IDLE_TIMEOUT = 0.3
 
             async def process_tts_buffer():
                 nonlocal tts_buffer
@@ -114,7 +145,6 @@ async def twilio_handler(twilio_ws):
                 try:
                     message = await asyncio.wait_for(sts_ws.recv(), timeout=IDLE_TIMEOUT)
                 except asyncio.TimeoutError:
-                    # Таймаут — значит фраза закончилась
                     if tts_buffer:
                         print(f"[{time.time():.3f}] ⏰ Idle timeout — processing TTS buffer")
                         await process_tts_buffer()
@@ -123,6 +153,22 @@ async def twilio_handler(twilio_ws):
                 if isinstance(message, str):
                     decoded = json.loads(message)
                     print(f"[{time.time():.3f}] 🗨 Control message: {decoded}")
+
+                    if decoded.get("type") == "ConversationText":
+                        if decoded.get("role") == "user":
+                            bot_thinking = True
+                            if not bot_is_speaking and not filler_sent:
+                                await play_filler_to_twilio(twilio_ws, streamsid)
+                                filler_sent = True
+                                print(f"[{time.time():.3f}] 💬 Filler sent after user speech")
+                        elif decoded.get("role") == "assistant":
+                            bot_thinking = True
+
+                    if decoded.get("type") == "AgentAudioDone":
+                        bot_is_speaking = False
+                        bot_thinking = False
+                        filler_sent = False
+                        print(f"[{time.time():.3f}] 🟢 TTS done → bot_is_speaking=False, bot_thinking=False")
 
                     if decoded['type'] == 'UserStartedSpeaking':
                         if tts_buffer:
@@ -138,6 +184,8 @@ async def twilio_handler(twilio_ws):
                         first_tts_chunk = True
                         print(f"[{time.time():.3f}] 🚫 Barge-in: should_clear=True, first_tts_chunk=True")
                     continue
+
+                bot_is_speaking = True
 
                 if first_tts_chunk:
                     global tts_start_ts, last_user_chunk_ts
@@ -157,7 +205,7 @@ async def twilio_handler(twilio_ws):
 
         async def twilio_receiver():
             print(f"[{time.time():.3f}] 🔄 twilio_receiver started")
-            BUFFER_SIZE = 5 * 160  # 0.1 сек аудио
+            BUFFER_SIZE = 5 * 160
             inbuffer = bytearray(b"")
 
             async for message in twilio_ws:
@@ -202,7 +250,6 @@ async def twilio_handler(twilio_ws):
 
         await twilio_ws.close()
         print(f"[{time.time():.3f}] ✅ twilio_handler closed Twilio WS connection")
-
 
 async def router(websocket, path):
     print(f"Path: {path}")
