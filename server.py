@@ -102,7 +102,7 @@ async def twilio_handler(twilio_ws):
 
             tts_buffer = bytearray()
             last_chunk_ts = time.time()
-            IDLE_TIMEOUT = 0.3
+            IDLE_TIMEOUT = 0.1
 
             async def process_tts_buffer():
                 nonlocal tts_buffer
@@ -117,14 +117,14 @@ async def twilio_handler(twilio_ws):
                 with tempfile.NamedTemporaryFile(delete=False) as tmp_out:
                     tmp_output_path = tmp_out.name
 
-                print(f"[{time.time():.3f}] ⚡ Running ffmpeg atempo=1.2")
+                print(f"[{time.time():.3f}] ⚡ Running ffmpeg atempo=1.3")
                 subprocess.run([
                     "ffmpeg",
                     "-y",
                     "-f", "mulaw",
                     "-ar", "8000",
                     "-i", tmp_input_path,
-                    "-filter:a", "atempo=1.2",
+                    "-filter:a", "atempo=1.3",
                     "-f", "mulaw",
                     tmp_output_path
                 ], check=True)
@@ -169,12 +169,11 @@ async def twilio_handler(twilio_ws):
                                 filler_sent = True
 
                         elif decoded.get("role") == "assistant":
-                            if filler_task and not filler_task.done():
-                                filler_task.cancel()
-                                print(f"[{time.time():.3f}] ✂️ Filler CANCELLED by ConversationText id={id(filler_task)}")
+                            pass
 
                     if decoded.get("type") == "AgentAudioDone":
                         if filler_task and not filler_task.done():
+                            await asyncio.sleep(0.1)
                             filler_task.cancel()
                             print(f"[{time.time():.3f}] ✂️ Filler CANCELLED by AgentAudioDone id={id(filler_task)}")
                         bot_is_speaking = False
